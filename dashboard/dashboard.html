@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Provenance Guard — Analytics Dashboard</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "SF Mono", "Fira Code", monospace;
+      background: #0d1117;
+      color: #e6edf3;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+
+    header {
+      border-bottom: 1px solid #21262d;
+      padding-bottom: 1.25rem;
+      margin-bottom: 2rem;
+    }
+
+    header h1 {
+      font-size: 1.2rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      color: #58a6ff;
+    }
+
+    header p {
+      font-size: 0.78rem;
+      color: #8b949e;
+      margin-top: 0.3rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.25rem;
+      margin-bottom: 2rem;
+    }
+
+    .stat-card {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 1.25rem 1.5rem;
+    }
+
+    .stat-card .label {
+      font-size: 0.70rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #8b949e;
+      margin-bottom: 0.5rem;
+    }
+
+    .stat-card .value {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #e6edf3;
+      line-height: 1;
+    }
+
+    .stat-card .sub {
+      font-size: 0.72rem;
+      color: #8b949e;
+      margin-top: 0.4rem;
+    }
+
+    .stat-card.warn .value  { color: #f0883e; }
+    .stat-card.good .value  { color: #3fb950; }
+    .stat-card.info .value  { color: #58a6ff; }
+
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 1.25rem;
+      margin-bottom: 2rem;
+    }
+
+    .chart-card {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 1.25rem;
+    }
+
+    .chart-card h2 {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #8b949e;
+      margin-bottom: 1rem;
+    }
+
+    canvas { max-height: 220px; }
+
+    .signal-explain {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      padding: 1.25rem 1.5rem;
+      font-size: 0.78rem;
+      color: #8b949e;
+      line-height: 1.7;
+    }
+
+    .signal-explain strong { color: #e6edf3; }
+
+    .refresh {
+      font-size: 0.72rem;
+      color: #8b949e;
+      margin-top: 1.5rem;
+      text-align: right;
+    }
+
+    #error-banner {
+      display: none;
+      background: #3d1f1f;
+      border: 1px solid #f85149;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      font-size: 0.8rem;
+      color: #f85149;
+      margin-bottom: 1.5rem;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ Provenance Guard — Analytics Dashboard</h1>
+  <p>Real-time detection patterns, appeal rates, and signal health metrics</p>
+</header>
+
+<div id="error-banner"></div>
+
+<div class="grid" id="stat-cards">
+  <div class="stat-card info">
+    <div class="label">Total Submissions</div>
+    <div class="value" id="stat-total">—</div>
+    <div class="sub">all time</div>
+  </div>
+  <div class="stat-card warn">
+    <div class="label">Appeal Rate</div>
+    <div class="value" id="stat-appeal">—</div>
+    <div class="sub">proxy for false-positive rate</div>
+  </div>
+  <div class="stat-card warn">
+    <div class="label">Signal Disagreement Rate</div>
+    <div class="value" id="stat-disagree">—</div>
+    <div class="sub">early warning for threshold drift</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Avg Combined Score</div>
+    <div class="value" id="stat-avg">—</div>
+    <div class="sub">0 = human · 1 = AI</div>
+  </div>
+</div>
+
+<div class="charts-grid">
+  <div class="chart-card">
+    <h2>Detection Distribution</h2>
+    <canvas id="chart-dist"></canvas>
+  </div>
+  <div class="chart-card">
+    <h2>Daily Submission Volume (last 14 days)</h2>
+    <canvas id="chart-daily"></canvas>
+  </div>
+  <div class="chart-card">
+    <h2>Appeals vs Disagreements</h2>
+    <canvas id="chart-appeals"></canvas>
+  </div>
+</div>
+
+<div class="signal-explain">
+  <strong>Signal disagreement rate</strong> measures the percentage of submissions where
+  one signal contradicted the other two. Persistent disagreement (above ~20%) is an early
+  warning that signal weights or thresholds need recalibration — the ensemble is less
+  confident than its combined score suggests. <strong>Appeal rate</strong> is a lagging
+  indicator of false positives: creators who know their work is human-written and push back.
+  Track both together to distinguish systematic miscalibration from edge-case noise.
+</div>
+
+<div class="refresh" id="refresh-time"></div>
+
+<script>
+const API = window.location.origin;
+
+const COLORS = {
+  LIKELY_AI:    "#f85149",
+  UNCERTAIN:    "#f0883e",
+  LIKELY_HUMAN: "#3fb950",
+};
+
+// Track chart instances so we can destroy before redrawing
+const charts = {};
+
+function destroyChart(id) {
+  if (charts[id]) {
+    charts[id].destroy();
+    delete charts[id];
+  }
+}
+
+async function load() {
+  try {
+    const resp = await fetch(`${API}/analytics`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const d = await resp.json();
+
+    // Stat cards
+    document.getElementById("stat-total").textContent   = d.total_submissions;
+    document.getElementById("stat-appeal").textContent  = d.appeal_rate_pct + "%";
+    document.getElementById("stat-disagree").textContent = d.signal_disagreement_rate_pct + "%";
+    document.getElementById("stat-avg").textContent     = d.avg_combined_score.toFixed(3);
+
+    // Chart 1: detection distribution doughnut
+    const dist = d.label_distribution;
+    const labels = Object.keys(dist);
+    destroyChart("dist");
+    charts["dist"] = new Chart(document.getElementById("chart-dist"), {
+      type: "doughnut",
+      data: {
+        labels,
+        datasets: [{
+          data: labels.map(l => dist[l]),
+          backgroundColor: labels.map(l => COLORS[l] || "#8b949e"),
+          borderWidth: 0,
+        }],
+      },
+      options: {
+        plugins: {
+          legend: { labels: { color: "#8b949e", font: { family: "monospace" } } },
+        },
+      },
+    });
+
+    // Chart 2: daily volume bar chart
+    const daily = [...d.daily_counts].reverse();
+    destroyChart("daily");
+    charts["daily"] = new Chart(document.getElementById("chart-daily"), {
+      type: "bar",
+      data: {
+        labels: daily.map(r => r.day),
+        datasets: [{
+          label: "Submissions",
+          data: daily.map(r => r.cnt),
+          backgroundColor: "#1f6feb",
+          borderRadius: 3,
+        }],
+      },
+      options: {
+        scales: {
+          x: { ticks: { color: "#8b949e", font: { family: "monospace", size: 10 } }, grid: { color: "#21262d" } },
+          y: { ticks: { color: "#8b949e", font: { family: "monospace" } }, grid: { color: "#21262d" }, beginAtZero: true },
+        },
+        plugins: { legend: { display: false } },
+      },
+    });
+
+    // Chart 3: appeals vs disagreements bar
+    destroyChart("appeals");
+    charts["appeals"] = new Chart(document.getElementById("chart-appeals"), {
+      type: "bar",
+      data: {
+        labels: ["Appealed", "Signal Disagree", "Clean"],
+        datasets: [{
+          label: "Submissions",
+          data: [
+            d.total_appealed,
+            d.total_disagree,
+            d.total_submissions - d.total_appealed - d.total_disagree,
+          ],
+          backgroundColor: ["#f85149", "#f0883e", "#3fb950"],
+          borderRadius: 3,
+        }],
+      },
+      options: {
+        scales: {
+          x: { ticks: { color: "#8b949e", font: { family: "monospace" } }, grid: { color: "#21262d" } },
+          y: { ticks: { color: "#8b949e", font: { family: "monospace" } }, grid: { color: "#21262d" }, beginAtZero: true },
+        },
+        plugins: { legend: { display: false } },
+      },
+    });
+
+    document.getElementById("refresh-time").textContent =
+      "Last updated: " + new Date().toLocaleTimeString();
+
+  } catch (err) {
+    const banner = document.getElementById("error-banner");
+    banner.style.display = "block";
+    banner.textContent = "Failed to load analytics: " + err.message;
+  }
+}
+
+load();
+// Auto-refresh every 30s
+setInterval(load, 30000);
+</script>
+</body>
+</html>
